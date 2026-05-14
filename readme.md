@@ -1,5 +1,7 @@
 Here's a full, simple Python walkthrough covering the three steps: creating a small LLM, using RAG, and fine-tuning. We'll keep it beginner-friendly, using Hugging Face Transformers and FAISS for retrieval.
 
+The full runnable script is in [`scripts/train-rag-finetune.py`](scripts/train-rag-finetune.py).
+
 # Python Walkthrough: LLM, RAG, Fine-Tuning
 
 ## 1️⃣ Setup
@@ -7,144 +9,202 @@ Here's a full, simple Python walkthrough covering the three steps: creating a sm
 Install the necessary packages:
 
 ```
-pip install torch transformers datasets faiss-cpu sentence-transformers
+pip install torch transformers datasets faiss-cpu sentence-transformers accelerate
 ```
 
-- transformers: LLM models & tokenizers
-- datasets: sample datasets
-- faiss-cpu: vector search engine for RAG
-- sentence-transformers: embedding model for document search
+| Package | Purpose |
+|---|---|
+| `torch` | Deep learning backend used by all models |
+| `transformers` | LLM models, tokenizers, and the Trainer API |
+| `datasets` | Lightweight dataset loading and preprocessing |
+| `faiss-cpu` | Vector similarity search engine for RAG retrieval |
+| `sentence-transformers` | Embedding model that converts text to vectors |
+| `accelerate` | Required backend for the Hugging Face Trainer |
+
+---
 
 ## 2️⃣ Creating & Training a Small LLM
 
-We'll create a tiny GPT-like model and train on a small dataset.
+We load a pre-trained tiny GPT-2 model (~2.5 MB) and run a short training loop on three example sentences. The goal is to show how the training pipeline works, not to produce a capable model.
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 from datasets import Dataset
 
-# Sample data
-data = [
+# Sample training data — three short sentences the model will train on
+train_data = [
     {"text": "Hello, how are you?"},
     {"text": "I am learning AI."},
     {"text": "RAG stands for Retrieval-Augmented Generation."},
 ]
 
-dataset = Dataset.from_list(data)
+dataset = Dataset.from_list(train_data)
 
-# Tokenizer & model (small GPT2)
-model_name = "sshleifer/tiny-gpt2"  # very small GPT2
+# Load a tiny GPT-2 model (2.5 MB, 2 transformer layers — fast but nonsensical output)
+model_name = "sshleifer/tiny-gpt2"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# GPT-2 has no padding token by default — set it to the end-of-sequence token
+tokenizer.pad_token = tokenizer.eos_token
+
 model = AutoModelForCausalLM.from_pretrained(model_name)
 
-# Tokenize
+# Tokenize: convert text to token IDs, pad/truncate to 32 tokens
+# labels = input_ids tells the model to predict the next token at each position (causal LM objective)
 def tokenize(batch):
-    return tokenizer(batch["text"], truncation=True, padding="max_length", max_length=32)
+    enc = tokenizer(batch["text"], truncation=True, padding="max_length", max_length=32)
+    enc["labels"] = enc["input_ids"].copy()
+    return enc
 
 tokenized_dataset = dataset.map(tokenize, batched=True)
 
-# Training arguments
+# TrainingArguments controls the training loop behaviour
 training_args = TrainingArguments(
-    output_dir="./llm_small",
-    per_device_train_batch_size=2,
-    num_train_epochs=2,
-    logging_steps=1,
-    save_steps=5,
-    save_total_limit=1,
-    logging_dir="./logs",
-    remove_unused_columns=False,
+    output_dir="./llm_small",          # where to save model checkpoints
+    per_device_train_batch_size=2,      # 2 samples per gradient update
+    num_train_epochs=2,                 # pass over the full dataset twice
+    logging_steps=1,                    # print loss after every step
+    save_steps=5,                       # save a checkpoint every 5 steps
+    save_total_limit=1,                 # keep only the latest checkpoint
+    remove_unused_columns=False,        # keep all dataset columns (including labels)
 )
 
-# Trainer
+# Trainer wraps the model, data, and training arguments into a single train() call
 trainer = Trainer(
     model=model,
     args=training_args,
     train_dataset=tokenized_dataset,
 )
 
-# Train
 trainer.train()
 ```
 
-✅ Now you have a small LLM trained on custom data.
+**Expected output:**
+
+```
+{'loss': '10.48', 'grad_norm': '2.18', 'learning_rate': '5e-05', 'epoch': '0.5'}
+{'loss': '10.48', 'grad_norm': '1.87', 'learning_rate': '3.75e-05', 'epoch': '1.0'}
+...
+{'train_runtime': '0.21', 'train_loss': '10.48', 'epoch': '2'}
+```
+
+A high loss (~10.48) is expected — `tiny-gpt2` has random weights and only 3 training samples. The loss would drop significantly with a larger model and more data. The trained model is saved to `./llm_small/`.
+
+---
 
 ## 3️⃣ Using RAG (Retrieval-Augmented Generation)
 
-RAG allows your LLM to look up documents before answering.
+RAG splits the answering process into two stages:
+1. **Retrieve** — find the most relevant document from a knowledge base using vector similarity
+2. **Generate** — pass that document as context to the LLM to guide its output
 
 ```python
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 
-# Sample knowledge base
+# Knowledge base — in production this could be thousands of documents
 documents = [
     "Python is a programming language.",
-    "Hugging Face provides transformers library.",
-    "RAG combines retrieval and generation for better answers.",
+    "Hugging Face provides the transformers library.",
+    "RAG combines retrieval and generation to answer questions better.",
 ]
 
-# Create embeddings
+# SentenceTransformer converts each document into a 384-dimensional embedding vector
+# Semantically similar sentences will have vectors that are close together
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 doc_embeddings = embed_model.encode(documents)
 
-# Build FAISS index
-dimension = doc_embeddings.shape[1]
-index = faiss.IndexFlatL2(dimension)
+# FAISS builds an index over those vectors for fast nearest-neighbour search
+dimension = doc_embeddings.shape[1]   # 384
+index = faiss.IndexFlatL2(dimension)  # L2 (Euclidean) distance
 index.add(np.array(doc_embeddings))
 
-# Example query
+# At query time: embed the question, search for the closest document vector
 query = "What is RAG in AI?"
 query_embedding = embed_model.encode([query])
-D, I = index.search(np.array(query_embedding), k=1)
+D, I = index.search(np.array(query_embedding), k=1)  # return top-1 result
+retrieved_doc = documents[I[0][0]]
 
-print("Retrieved doc:", documents[I[0][0]])
-```
-Now combine retrieval with your small LLM:
+print("Query:", query)
+print("Retrieved doc:", retrieved_doc)
 
-```python
-input_text = "Answer the question using this doc: " + documents[I[0][0]] + "\nQuestion: " + query
+# Combine the retrieved document with the question and feed it to the LLM
+input_text = (
+    f"Use the following document to answer the question.\n"
+    f"Document: {retrieved_doc}\n"
+    f"Question: {query}"
+)
 inputs = tokenizer(input_text, return_tensors="pt")
-
 outputs = model.generate(**inputs, max_new_tokens=50)
-print(tokenizer.decode(outputs[0]))
+print("LLM output:", tokenizer.decode(outputs[0], skip_special_tokens=True))
 ```
 
-✅ The LLM now uses the retrieved document to generate better answers.
+**Expected output:**
+
+```
+Query: What is RAG in AI?
+Retrieved doc: RAG combines retrieval and generation to answer questions better.
+LLM output: Use the following document to answer the question.
+Document: RAG combines retrieval and generation to answer questions better.
+Question: What is RAG in AI? <repetitive noise from tiny-gpt2>
+```
+
+The retrieval step works correctly — FAISS returns the most semantically relevant document. The generation is nonsensical because `tiny-gpt2` is too small to follow instructions. With a real model (e.g. `gpt2`, `mistral`, or any instruction-tuned LLM) the answer would be coherent.
+
+---
 
 ## 4️⃣ Fine-Tuning the LLM
 
-Fine-tuning lets you improve your LLM with more targeted data.
-```oython
-# New dataset (improved)
+Fine-tuning continues training the model on a new, more targeted dataset. We reuse the same `Trainer` and `tokenize` function from Step 1, just swapping in a different dataset.
+
+```python
+# Improved dataset with more precise, domain-specific phrasing
 fine_tune_data = [
-    {"text": "RAG combines a retriever with a generator to answer questions."},
-    {"text": "Python is easy to learn for AI."},
+    {"text": "RAG combines a retriever with a generator to answer questions accurately."},
+    {"text": "Python is easy to learn and widely used for AI applications."},
 ]
 
 fine_tune_dataset = Dataset.from_list(fine_tune_data)
 tokenized_fine_tune = fine_tune_dataset.map(tokenize, batched=True)
 
-# Use same Trainer
+# Swap the training dataset and re-run — the model's weights continue updating
 trainer.train_dataset = tokenized_fine_tune
 trainer.train()
+
+# Test the fine-tuned model
+inputs = tokenizer("Explain RAG simply.", return_tensors="pt")
+outputs = model.generate(**inputs, max_new_tokens=50)
+print("Fine-tuned LLM output:", tokenizer.decode(outputs[0], skip_special_tokens=True))
 ```
 
-✅ Your model is now fine-tuned and should generate better answers based on improved data.
+**Expected output:**
+
+```
+{'loss': '10.48', 'grad_norm': '1.29', 'epoch': '1'}
+{'loss': '10.48', 'grad_norm': '1.90', 'epoch': '2'}
+Fine-tuned LLM output: Explain RAG simply. <repetitive noise from tiny-gpt2>
+```
+
+The fine-tuning step runs successfully. Again, coherent output requires a larger model. The weights are updated and the model is saved to `./llm_small/`.
+
+---
 
 ## 5️⃣ Summary
-Step | Purpose | Python Components
---|--|--|
-LLM Creation | Train a small GPT2 | transformers, Trainer
-RAG | Retrieve documents for better context | faiss, sentence-transformers
-Fine-Tuning | Improve LLM accuracy | Trainer + new dataset
 
-This walkthrough keeps everything small and fast, so it runs on a laptop.
+| Step | What it does | Key components |
+|---|---|---|
+| **1 — Train** | Load a pre-trained model and continue training on custom data | `AutoModelForCausalLM`, `Trainer`, `TrainingArguments` |
+| **2 — RAG** | Retrieve the most relevant document at query time, then generate a response grounded in it | `SentenceTransformer`, `faiss`, `model.generate()` |
+| **3 — Fine-tune** | Update the model weights further on a smaller, targeted dataset | `Trainer` with a new `train_dataset` |
+
+This walkthrough keeps everything small and fast, so it runs on a laptop in under a minute.
 For production, you can scale:
 
-- Bigger LLMs: gpt2, flan-t5-small, bloom-560m
-- Bigger document corpora for RAG
-- Mixed precision training for GPU
+- Bigger LLMs: `gpt2`, `flan-t5-small`, `bloom-560m`, `mistral-7b`
+- Larger document corpora for RAG (thousands of PDFs, wikis, databases)
+- Mixed precision training (`fp16=True` in `TrainingArguments`) for GPU speedup
+- LoRA / QLoRA for memory-efficient fine-tuning of large models
 
 ---
 
