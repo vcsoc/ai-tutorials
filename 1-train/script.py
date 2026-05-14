@@ -13,11 +13,14 @@ dataset = Dataset.from_list(data)
 # Tokenizer & model (small GPT2)
 model_name = "sshleifer/tiny-gpt2"  # very small GPT2
 tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer.pad_token = tokenizer.eos_token
 model = AutoModelForCausalLM.from_pretrained(model_name)
 
 # Tokenize
 def tokenize(batch):
-    return tokenizer(batch["text"], truncation=True, padding="max_length", max_length=32)
+    enc = tokenizer(batch["text"], truncation=True, padding="max_length", max_length=32)
+    enc["labels"] = enc["input_ids"].copy()
+    return enc
 
 tokenized_dataset = dataset.map(tokenize, batched=True)
 
