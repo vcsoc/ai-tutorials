@@ -15,7 +15,11 @@ Run:
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 from datasets import Dataset
 
-MODEL_DIR = "./llm_small"   # written by 1-train/script.py; overwritten after fine-tuning
+MODEL_DIR  = "./llm_small"      # written by 1-train/script.py
+OUTPUT_DIR = "./llm_small_ft"   # fine-tuned weights saved here
+# Note: we save to a *different* directory because Windows holds an open
+# memory-map on the safetensors file loaded from MODEL_DIR, and won't allow
+# that file to be overwritten while the process is running (os error 1224).
 
 print("=== Step 3: Fine-tuning LLM ===")
 
@@ -47,7 +51,7 @@ tokenized_fine_tune = fine_tune_dataset.map(tokenize, batched=True)
 # ── Training ──────────────────────────────────────────────────────────────────
 
 training_args = TrainingArguments(
-    output_dir=MODEL_DIR,
+    output_dir=OUTPUT_DIR,
     per_device_train_batch_size=2,
     num_train_epochs=2,
     learning_rate=2e-5,              # lower than step 1 — adjusting, not relearning
@@ -74,8 +78,8 @@ print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 
 # ── Save updated weights ──────────────────────────────────────────────────────
 
-model.save_pretrained(MODEL_DIR)
-tokenizer.save_pretrained(MODEL_DIR)
+model.save_pretrained(OUTPUT_DIR)
+tokenizer.save_pretrained(OUTPUT_DIR)
 
-print(f"\n✅ Fine-tuned model saved to {MODEL_DIR}/")
+print(f"\n✅ Fine-tuned model saved to {OUTPUT_DIR}/")
 print("   Next: run  python 4-export/script.py  (export to GGUF for Ollama/LM Studio)")
