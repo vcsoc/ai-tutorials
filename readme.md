@@ -1,8 +1,10 @@
-Here's a full, simple Python walkthrough covering the three steps: creating a small LLM, using RAG, and fine-tuning. We'll keep it beginner-friendly, using Hugging Face Transformers and FAISS for retrieval.
+Here's a full, simple Python walkthrough covering four steps: creating a small LLM, using RAG, fine-tuning, and exporting to a format you can load in Ollama or LM Studio and test with natural language. We'll keep it beginner-friendly, using Hugging Face Transformers and FAISS for retrieval.
 
-The full runnable script is in [`scripts/train-rag-finetune.py`](scripts/train-rag-finetune.py).
+Scripts:
+- Steps 1–3: [`scripts/train-rag-finetune.py`](scripts/train-rag-finetune.py)
+- Step 4 (export): [`4-export/script.py`](4-export/script.py)
 
-# Python Walkthrough: LLM, RAG, Fine-Tuning
+# Python Walkthrough: LLM, RAG, Fine-Tuning, Export
 
 ## 1️⃣ Setup
 
@@ -190,6 +192,150 @@ The fine-tuning step runs successfully. Again, coherent output requires a larger
 
 ---
 
+## 4️⃣ Export to GGUF — Run in Ollama or LM Studio
+
+This step uses a different, larger base model (`SmolLM2-135M-Instruct`) that is small enough to run on a laptop but actually produces coherent natural language. It fine-tunes on a small Q&A dataset, then exports to GGUF format so you can load it into Ollama or LM Studio.
+
+See [`4-export/script.py`](4-export/script.py) for the full script.
+
+### Extra dependencies
+
+```
+pip install gguf sentencepiece
+```
+
+### Model choice: `SmolLM2-135M-Instruct`
+
+| Property | Value |
+|---|---|
+| Parameters | 135 M |
+| Download size | ~270 MB |
+| Architecture | LLaMA (supported by llama.cpp) |
+| Already instruction-tuned? | Yes — understands user/assistant chat format |
+| Output quality | Basic but coherent natural language |
+
+### What the script does
+
+**Step 1 — Load the model**
+
+```python
+MODEL_NAME = "HuggingFaceTB/SmolLM2-135M-Instruct"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model     = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+```
+
+SmolLM2-Instruct is already trained to follow instructions, so we don't need much data to specialise it.
+
+**Step 2 — Fine-tune on a small Q&A dataset**
+
+Each training example is formatted using the model's built-in ChatML template before tokenizing:
+
+```python
+qa_pairs = [
+    ("What is RAG?",
+     "RAG stands for Retrieval-Augmented Generation. It retrieves relevant "
+     "documents at query time and uses them as context for an LLM."),
+    ("What is fine-tuning?",
+     "Fine-tuning continues training a pre-trained model on a smaller, "
+     "task-specific dataset to specialise its knowledge or style."),
+    # ... more pairs
+]
+
+def make_example(question, answer):
+    messages = [
+        {"role": "user",      "content": question},
+        {"role": "assistant", "content": answer},
+    ]
+    # apply_chat_template produces ChatML-formatted text:
+    # <|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n{answer}<|im_end|>
+    return {"text": tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)}
+```
+
+The tokenize function is the same as before — pad to 256 tokens and set `labels = input_ids`.
+
+Training uses a lower learning rate (`2e-5`) than a from-scratch run because we are only adjusting an already-capable model, not training it from random weights.
+
+**Step 3 — Save in HuggingFace format**
+
+```python
+model.save_pretrained("./my-smollm2")
+tokenizer.save_pretrained("./my-smollm2")
+```
+
+This writes the model weights, config, and tokenizer files to `./my-smollm2/`.
+
+**Step 4 — Convert to GGUF**
+
+GGUF is the binary format used by llama.cpp, Ollama, and LM Studio. The converter is a pure-Python script from the llama.cpp repo — no C++ compilation needed.
+
+```python
+import urllib.request, subprocess, sys
+
+# Download the converter once (requires: pip install gguf sentencepiece)
+if not os.path.exists("convert_hf_to_gguf.py"):
+    urllib.request.urlretrieve(
+        "https://raw.githubusercontent.com/ggerganov/llama.cpp/master/convert_hf_to_gguf.py",
+        "convert_hf_to_gguf.py"
+    )
+
+subprocess.run([
+    sys.executable, "convert_hf_to_gguf.py",
+    "./my-smollm2",
+    "--outfile", "./my-smollm2.gguf",
+    "--outtype", "q8_0",   # 8-bit quantization: ~135 MB, near-lossless quality
+], check=True)
+```
+
+`--outtype q8_0` applies 8-bit quantization, halving the file size from ~270 MB to ~135 MB with minimal quality loss. Other options: `f16` (full precision, ~270 MB) or `f32` (largest, ~540 MB).
+
+**Step 5 — Create an Ollama Modelfile**
+
+```
+FROM /absolute/path/to/my-smollm2.gguf
+
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER stop "<|im_end|>"
+
+SYSTEM "You are a helpful AI assistant specialised in machine learning and Python."
+```
+
+### Expected output
+
+```
+=== Step 1: Loading SmolLM2-135M-Instruct ===
+=== Step 2: Fine-tuning on custom Q&A data ===
+{'loss': '1.23', 'epoch': '1.0'} ...
+{'train_loss': '0.87', 'epoch': '3'}
+=== Step 3: Saving model in HuggingFace format ===
+Model saved to ./my-smollm2/
+=== Step 4: Converting to GGUF ===
+GGUF saved to: C:\...\my-smollm2.gguf
+=== Step 5: Creating Ollama Modelfile ===
+Modelfile written.
+```
+
+Unlike `tiny-gpt2`, SmolLM2-135M-Instruct is capable of coherent natural language responses on simple questions.
+
+### Loading in Ollama
+
+```bash
+# Register the model
+ollama create my-smollm2 -f Modelfile
+
+# Start a chat session
+ollama run my-smollm2
+```
+
+### Loading in LM Studio
+
+1. Open LM Studio
+2. Go to **My Models → Load Model from File**
+3. Select `my-smollm2.gguf`
+4. Start chatting in the Chat tab
+
+---
+
 ## 5️⃣ Summary
 
 | Step | What it does | Key components |
@@ -197,8 +343,9 @@ The fine-tuning step runs successfully. Again, coherent output requires a larger
 | **1 — Train** | Load a pre-trained model and continue training on custom data | `AutoModelForCausalLM`, `Trainer`, `TrainingArguments` |
 | **2 — RAG** | Retrieve the most relevant document at query time, then generate a response grounded in it | `SentenceTransformer`, `faiss`, `model.generate()` |
 | **3 — Fine-tune** | Update the model weights further on a smaller, targeted dataset | `Trainer` with a new `train_dataset` |
+| **4 — Export** | Fine-tune a real instruction model, convert to GGUF, load in Ollama or LM Studio | `SmolLM2-135M-Instruct`, `convert_hf_to_gguf.py`, Ollama Modelfile |
 
-This walkthrough keeps everything small and fast, so it runs on a laptop in under a minute.
+This walkthrough keeps everything small and fast, so it runs on a laptop.
 For production, you can scale:
 
 - Bigger LLMs: `gpt2`, `flan-t5-small`, `bloom-560m`, `mistral-7b`
