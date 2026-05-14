@@ -1,8 +1,39 @@
-Here's a full, simple Python walkthrough covering four steps: creating a small LLM, using RAG, fine-tuning, and exporting to a format you can load in Ollama or LM Studio and test with natural language. We'll keep it beginner-friendly, using Hugging Face Transformers and FAISS for retrieval.
+A beginner-friendly Python walkthrough covering four steps: creating a small LLM, using RAG, fine-tuning, and exporting to a format you can load in Ollama or LM Studio and test with natural language.
 
-Scripts:
-- Steps 1–3: [`scripts/train-rag-finetune.py`](scripts/train-rag-finetune.py)
-- Step 4 (export): [`4-export/script.py`](4-export/script.py)
+## Repository structure
+
+```
+1-train/script.py       — train a small GPT-2 model, save to ./llm_small/
+2-rag/script.py         — load the model, run a RAG query with FAISS
+3-finetune/script.py    — fine-tune the model on a second dataset, save back
+4-export/script.py      — fine-tune SmolLM2-135M, export to GGUF for Ollama/LM Studio
+scripts/train-rag-finetune.py  — single-file version of steps 1–3 combined
+```
+
+## Running end-to-end
+
+```bash
+# 1. Install dependencies
+pip install torch transformers datasets faiss-cpu sentence-transformers accelerate
+
+# 2. Train — downloads tiny-gpt2 (~2.5 MB) and saves trained model to ./llm_small/
+python 1-train/script.py
+
+# 3. RAG — loads ./llm_small/, retrieves the best document, generates a response
+python 2-rag/script.py
+
+# 4. Fine-tune — loads ./llm_small/, trains on new data, saves updated weights
+python 3-finetune/script.py
+
+# 5. Export to GGUF (optional — requires: pip install gguf sentencepiece)
+#    Downloads SmolLM2-135M-Instruct, fine-tunes it, exports my-smollm2.gguf
+python 4-export/script.py
+```
+
+Each script prints what it's doing and tells you which script to run next.  
+Scripts 1–3 all use `./llm_small/` as the shared model directory (relative to the repo root), so they must be run from the repo root as shown above.
+
+---
 
 # Python Walkthrough: LLM, RAG, Fine-Tuning, Export
 
@@ -14,6 +45,12 @@ Install the necessary packages:
 pip install torch transformers datasets faiss-cpu sentence-transformers accelerate
 ```
 
+For step 4 (GGUF export) also install:
+
+```
+pip install gguf sentencepiece
+```
+
 | Package | Purpose |
 |---|---|
 | `torch` | Deep learning backend used by all models |
@@ -22,12 +59,16 @@ pip install torch transformers datasets faiss-cpu sentence-transformers accelera
 | `faiss-cpu` | Vector similarity search engine for RAG retrieval |
 | `sentence-transformers` | Embedding model that converts text to vectors |
 | `accelerate` | Required backend for the Hugging Face Trainer |
+| `gguf` | Writes GGUF files (step 4 only) |
+| `sentencepiece` | Tokenizer dependency for SmolLM2 (step 4 only) |
 
 ---
 
-## 2️⃣ Creating & Training a Small LLM
+## 2️⃣ Step 1 — Create & Train a Small LLM
 
-We load a pre-trained tiny GPT-2 model (~2.5 MB) and run a short training loop on three example sentences. The goal is to show how the training pipeline works, not to produce a capable model.
+**Script:** [`1-train/script.py`](1-train/script.py)
+
+Loads `sshleifer/tiny-gpt2` (~2.5 MB, 2 transformer layers) and runs a short training loop. Saves the trained model and tokenizer to `./llm_small/` for the next scripts.
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
@@ -90,14 +131,17 @@ trainer.train()
 {'train_runtime': '0.21', 'train_loss': '10.48', 'epoch': '2'}
 ```
 
-A high loss (~10.48) is expected — `tiny-gpt2` has random weights and only 3 training samples. The loss would drop significantly with a larger model and more data. The trained model is saved to `./llm_small/`.
+A high loss (~10.48) is expected — `tiny-gpt2` has random weights and only 3 training samples. The loss would drop significantly with a larger model and more data. The trained model and tokenizer are saved to `./llm_small/`.
 
 ---
 
-## 3️⃣ Using RAG (Retrieval-Augmented Generation)
+## 3️⃣ Step 2 — RAG: Retrieval-Augmented Generation
 
-RAG splits the answering process into two stages:
-1. **Retrieve** — find the most relevant document from a knowledge base using vector similarity
+**Script:** [`2-rag/script.py`](2-rag/script.py)  
+**Prerequisite:** run `1-train/script.py` first (creates `./llm_small/`)
+
+Loads the model from `./llm_small/`, builds a FAISS vector index over a small knowledge base, retrieves the most relevant document for a query, and generates a response. RAG splits answering into two stages:
+1. **Retrieve** — find the most relevant document using vector similarity
 2. **Generate** — pass that document as context to the LLM to guide its output
 
 ```python
@@ -152,13 +196,16 @@ Document: RAG combines retrieval and generation to answer questions better.
 Question: What is RAG in AI? <repetitive noise from tiny-gpt2>
 ```
 
-The retrieval step works correctly — FAISS returns the most semantically relevant document. The generation is nonsensical because `tiny-gpt2` is too small to follow instructions. With a real model (e.g. `gpt2`, `mistral`, or any instruction-tuned LLM) the answer would be coherent.
+The retrieval step works correctly — FAISS returns the most semantically relevant document. The generation is nonsensical because `tiny-gpt2` is too small to follow instructions. With a real model (e.g. SmolLM2-135M-Instruct in step 4) the answer would be coherent.
 
 ---
 
-## 4️⃣ Fine-Tuning the LLM
+## 4️⃣ Step 3 — Fine-Tune the LLM
 
-Fine-tuning continues training the model on a new, more targeted dataset. We reuse the same `Trainer` and `tokenize` function from Step 1, just swapping in a different dataset.
+**Script:** [`3-finetune/script.py`](3-finetune/script.py)  
+**Prerequisite:** run `1-train/script.py` first (creates `./llm_small/`)
+
+Loads the model from `./llm_small/`, continues training on a second more targeted dataset, saves the updated weights back to `./llm_small/`.
 
 ```python
 # Improved dataset with more precise, domain-specific phrasing
@@ -188,11 +235,11 @@ print("Fine-tuned LLM output:", tokenizer.decode(outputs[0], skip_special_tokens
 Fine-tuned LLM output: Explain RAG simply. <repetitive noise from tiny-gpt2>
 ```
 
-The fine-tuning step runs successfully. Again, coherent output requires a larger model. The weights are updated and the model is saved to `./llm_small/`.
+The fine-tuning step runs successfully. Again, coherent output requires a larger model. The updated weights are saved back to `./llm_small/`.
 
 ---
 
-## 4️⃣ Export to GGUF — Run in Ollama or LM Studio
+## 5️⃣ Step 4 — Export to GGUF: Run in Ollama or LM Studio
 
 This step uses a different, larger base model (`SmolLM2-135M-Instruct`) that is small enough to run on a laptop but actually produces coherent natural language. It fine-tunes on a small Q&A dataset, then exports to GGUF format so you can load it into Ollama or LM Studio.
 
@@ -336,14 +383,14 @@ ollama run my-smollm2
 
 ---
 
-## 5️⃣ Summary
+## 6️⃣ Summary
 
-| Step | What it does | Key components |
-|---|---|---|
-| **1 — Train** | Load a pre-trained model and continue training on custom data | `AutoModelForCausalLM`, `Trainer`, `TrainingArguments` |
-| **2 — RAG** | Retrieve the most relevant document at query time, then generate a response grounded in it | `SentenceTransformer`, `faiss`, `model.generate()` |
-| **3 — Fine-tune** | Update the model weights further on a smaller, targeted dataset | `Trainer` with a new `train_dataset` |
-| **4 — Export** | Fine-tune a real instruction model, convert to GGUF, load in Ollama or LM Studio | `SmolLM2-135M-Instruct`, `convert_hf_to_gguf.py`, Ollama Modelfile |
+| Step | Script | What it does | Key components |
+|---|---|---|---|
+| **1 — Train** | [`1-train/script.py`](1-train/script.py) | Load tiny-gpt2, train on 3 sentences, save to `./llm_small/` | `AutoModelForCausalLM`, `Trainer`, `TrainingArguments` |
+| **2 — RAG** | [`2-rag/script.py`](2-rag/script.py) | Load model, retrieve best doc with FAISS, generate response | `SentenceTransformer`, `faiss`, `model.generate()` |
+| **3 — Fine-tune** | [`3-finetune/script.py`](3-finetune/script.py) | Load model, train on new data, save updated weights | `Trainer` with a new `train_dataset` |
+| **4 — Export** | [`4-export/script.py`](4-export/script.py) | Fine-tune SmolLM2-135M, export to GGUF, load in Ollama or LM Studio | `SmolLM2-135M-Instruct`, `convert_hf_to_gguf.py`, Ollama Modelfile |
 
 This walkthrough keeps everything small and fast, so it runs on a laptop.
 For production, you can scale:
